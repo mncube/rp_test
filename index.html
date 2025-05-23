@@ -1,0 +1,286 @@
+Below is a “rabbit‐vs‐fox” predator–prey ecosystem simulator. It is delivered as one complete HTML file with embedded CSS, a `<div id="game-container">` wrapper, and pure DOM event listeners. It starts a RandomPlayables session, sends an “init” event, and on reset sends a final “end” payload.
+
+Save this as `ecosystem.html` and deploy to `ecosystem.randomplayables.com`.
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ecosystem Simulation</title>
+  <style>
+    /* Container styling */
+    #game-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-family: sans-serif;
+      margin-top: 20px;
+    }
+    /* Canvas grid */
+    #ecosystem-canvas {
+      border: 1px solid #333;
+      background: #fafafa;
+    }
+    /* Control buttons */
+    .controls {
+      margin-top: 10px;
+    }
+    .controls button {
+      margin: 0 5px;
+      padding: 5px 10px;
+      font-size: 14px;
+    }
+    /* Stats display */
+    #stats {
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div id="game-container"></div>
+
+  <script>
+  (function(){
+    //
+    // --- PLATFORM API STUB (replace with real RandomPlayables API) ---
+    //
+    const rpAPI = window.RandomPlayablesAPI || {
+      startSession: (gameId) => {
+        console.log('RP: startSession', gameId);
+        return 'session-' + Date.now();
+      },
+      sendGameData: (sessionId, payload) => {
+        console.log('RP: sendGameData', sessionId, payload);
+      }
+    };
+    const sessionId = rpAPI.startSession('ecosystem-sim');
+
+    //
+    // --- PARAMETERS ---
+    //
+    const GRID_SIZE = 60;           // 60×60 cells
+    const CELL_PIXELS = 8;         // each cell is 8×8 px
+    const INIT_RABBITS = 200;
+    const INIT_FOXES = 50;
+    const STEP_INTERVAL = 200;     // ms between steps
+
+    //
+    // --- GAME STATE & UTILS ---
+    //
+    const CellType = { EMPTY: 0, RABBIT: 1, FOX: 2 };
+    // each cell: { type, age, energy }
+    let grid = [];
+    let stepCount = 0;
+    let running = false;
+    let timer = null;
+
+    function idx(x,y){ return y * GRID_SIZE + x; }
+
+    function randAdj(x,y){
+      // returns a random adjacent coordinate within bounds
+      const dirs = [
+        [0,1],[0,-1],[1,0],[-1,0],
+        [1,1],[1,-1],[-1,1],[-1,-1]
+      ];
+      const [dx,dy] = dirs[Math.floor(Math.random()*dirs.length)];
+      const nx = x+dx, ny=y+dy;
+      if(nx>=0 && ny>=0 && nx<GRID_SIZE && ny<GRID_SIZE) {
+        return [nx,ny];
+      }
+      return null;
+    }
+
+    function initGrid(){
+      grid = new Array(GRID_SIZE*GRID_SIZE).fill(null).map(() => ({
+        type: CellType.EMPTY, age:0, energy:0
+      }));
+      // place initial rabbits
+      let placed = 0;
+      while(placed < INIT_RABBITS){
+        const x = Math.floor(Math.random()*GRID_SIZE);
+        const y = Math.floor(Math.random()*GRID_SIZE);
+        const c = grid[idx(x,y)];
+        if(c.type===CellType.EMPTY){
+          c.type = CellType.RABBIT;
+          c.age = 0;
+          placed++;
+        }
+      }
+      // place initial foxes
+      placed = 0;
+      while(placed < INIT_FOXES){
+        const x = Math.floor(Math.random()*GRID_SIZE);
+        const y = Math.floor(Math.random()*GRID_SIZE);
+        const c = grid[idx(x,y)];
+        if(c.type===CellType.EMPTY){
+          c.type = CellType.FOX;
+          c.age = 0;
+          c.energy = 8;
+          placed++;
+        }
+      }
+      stepCount = 0;
+      updateStats();
+      drawGrid();
+      rpAPI.sendGameData(sessionId, {
+        event: 'init',
+        initial: { rabbits: INIT_RABBITS, foxes: INIT_FOXES, gridSize: GRID_SIZE }
+      });
+    }
+
+    //
+    // --- SIMULATION STEP ---
+    //
+    function step(){
+      stepCount++;
+      // we will produce a new grid each step to avoid double-updates
+      const newGrid = grid.map(cell => ({...cell}));
+      // iterate in random order to reduce bias
+      const order = Array.from(Array(GRID_SIZE*GRID_SIZE).keys());
+      for(let i= order.length-1; i>0; i--){
+        const j = Math.floor(Math.random()*(i+1));
+        [order[i], order[j]] = [order[j], order[i]];
+      }
+
+      order.forEach(index => {
+        const x = index % GRID_SIZE;
+        const y = Math.floor(index / GRID_SIZE);
+        const cell = grid[index];
+        if(cell.type===CellType.RABBIT){
+          // age & natural death
+          cell.age++;
+          if(cell.age>15){
+            newGrid[index] = {type:CellType.EMPTY, age:0, energy:0};
+            return;
+          }
+          // reproduction
+          if(cell.age>3 && Math.random()<0.04){
+            const nb = randAdj(x,y);
+            if(nb){
+              const ni = idx(nb[0],nb[1]);
+              if(newGrid[ni].type===CellType.EMPTY){
+                newGrid[ni] = {type:CellType.RABBIT, age:0, energy:0};
+              }
+            }
+          }
+        }
+        else if(cell.type===CellType.FOX){
+          cell.age++;
+          cell.energy--;
+          // death by starvation or age
+          if(cell.energy<=0 || cell.age>20){
+            newGrid[index] = {type:CellType.EMPTY, age:0, energy:0};
+            return;
+          }
+          // try to eat adjacent rabbit
+          let ate = false;
+          const neighbors = [];
+          [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]].forEach(d=>{
+            const nx = x+d[0], ny=y+d[1];
+            if(nx>=0 && ny>=0 && nx<GRID_SIZE && ny<GRID_SIZE){
+              if(grid[idx(nx,ny)].type===CellType.RABBIT){
+                neighbors.push([nx,ny]);
+              }
+            }
+          });
+          if(neighbors.length){
+            const [nx,ny] = neighbors[Math.floor(Math.random()*neighbors.length)];
+            const ni = idx(nx,ny);
+            // move fox, eat rabbit
+            newGrid[ni] = {type:CellType.FOX, age:cell.age, energy: cell.energy+5};
+            newGrid[index] = {type:CellType.EMPTY, age:0, energy:0};
+            ate = true;
+          } else {
+            // move to empty neighbor
+            const adj = randAdj(x,y);
+            if(adj){
+              const ni = idx(adj[0],adj[1]);
+              if(grid[ni].type===CellType.EMPTY && newGrid[ni].type===CellType.EMPTY){
+                newGrid[ni] = {...cell};
+                newGrid[index] = {type:CellType.EMPTY, age:0, energy:0};
+              }
+            }
+          }
+          // reproduce
+          if(cell.energy>12 && Math.random()<0.03){
+            const adj = randAdj(x,y);
+            if(adj){
+              const ni = idx(adj[0],adj[1]);
+              if(newGrid[ni].type===CellType.EMPTY){
+                newGrid[ni] = {type:CellType.FOX, age:0, energy:Math.floor(cell.energy/2)};
+                // parent energy halves
+                newGrid[index].energy = Math.floor(cell.energy/2);
+              }
+            }
+          }
+        }
+      });
+
+      grid = newGrid;
+      drawGrid();
+      updateStats();
+    }
+
+    //
+    // --- RENDERING & UI ---
+    //
+    const container = document.getElementById('game-container');
+    // build UI
+    const canvas = document.createElement('canvas');
+    canvas.id = 'ecosystem-canvas';
+    canvas.width = GRID_SIZE * CELL_PIXELS;
+    canvas.height = GRID_SIZE * CELL_PIXELS;
+    container.appendChild(canvas);
+    const ctx = canvas.getContext('2d');
+
+    const controls = document.createElement('div');
+    controls.className = 'controls';
+    const btnStart = document.createElement('button');
+    btnStart.textContent = 'Start';
+    const btnPause = document.createElement('button');
+    btnPause.textContent = 'Pause';
+    const btnReset = document.createElement('button');
+    btnReset.textContent = 'Reset';
+    controls.appendChild(btnStart);
+    controls.appendChild(btnPause);
+    controls.appendChild(btnReset);
+    container.appendChild(controls);
+
+    const stats = document.createElement('div');
+    stats.id = 'stats';
+    container.appendChild(stats);
+
+    btnStart.addEventListener('click', () => {
+      if(!running){
+        running = true;
+        timer = setInterval(step, STEP_INTERVAL);
+      }
+    });
+    btnPause.addEventListener('click', () => {
+      if(running){
+        clearInterval(timer);
+        running = false;
+      }
+    });
+    btnReset.addEventListener('click', () => {
+      clearInterval(timer);
+      running = false;
+      rpAPI.sendGameData(sessionId, {
+        event: 'end',
+        final: countEntities(),
+        steps: stepCount
+      });
+      initGrid();
+    });
+
+    function drawGrid(){
+      for(let y=0;y<GRID_SIZE;y++){
+        for(let x=0;x<GRID_SIZE;x++){
+          const cell = grid[idx(x,y)];
+          if(cell.type===CellType.EMPTY){
+            ctx.fillStyle = '#fafafa';
+          } else if(cell.type===CellType.RABBIT){
+            ctx.fillStyle = '#4caf50';  // green
+          } else if(cell.type===CellType.FOX){
+            ctx.fillStyle = '#f443
